@@ -1,0 +1,38 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  direction: rtl;
+  @apply bg-zinc-950 text-zinc-100;
+}
+
+.glass {
+  @apply bg-white/5 backdrop-blur-lg border border-white/10;
+}
+
+.glass-gift {
+  @apply bg-yellow-500/5 backdrop-blur-xl border border-yellow-500/20;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.1) 0%, rgba(251, 191, 36, 0.05) 100%);
+}
+
+@keyframes gift-float {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25% { transform: translateY(-10px) rotate(-5deg); }
+  75% { transform: translateY(-5px) rotate(5deg); }
+}
+
+.animate-gift-float {
+  animation: gift-float 3s ease-in-out infinite;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+

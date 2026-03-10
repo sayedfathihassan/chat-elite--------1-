@@ -1,0 +1,5 @@
+# Database
+database.sqlite
+.env
+node_modules
+dist
