@@ -3,20 +3,22 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "start": "tsx server.ts"
+    "start": "NODE_ENV=production npx tsx server.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "bcryptjs": "^3.0.3",
-    "better-sqlite3": "^12.4.1",
     "canvas-confetti": "^1.9.4",
     "clsx": "^2.1.1",
     "cookie-parser": "^1.4.7",
