@@ -8,7 +8,9 @@ import cookieParser from "cookie-parser";
 import * as path from "path";
 import db from "./db.ts";
 
+// --- Configuration ---
 const JWT_SECRET = process.env.JWT_SECRET || "chat-elite-secret-key-123";
+// Verification comment: Deployment version 1.0.1
 
 function generateUID() {
   return Math.floor(100000 + Math.random() * 900000).toString();
