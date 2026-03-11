@@ -12,7 +12,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "start": "NODE_ENV=production npx tsx server.ts"
+    "start": "npx tsx server.ts"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
@@ -28,7 +28,7 @@
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
-    "postgres": "^3.4.8",
+    "better-sqlite3": "^12.4.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.13.1",

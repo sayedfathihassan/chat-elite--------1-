@@ -42,46 +42,44 @@ async function startServer() {
   };
 
   // --- Auth Routes ---
-  app.post("/api/register", async (req, res) => {
+  app.post("/api/register", (req, res) => {
     let { username, password } = req.body;
     username = username?.trim();
     try {
-      const users = await db`SELECT COUNT(*) as count FROM users`;
-      const role = parseInt(users[0].count) === 0 ? 'admin' : 'user';
+      const usersCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
+      const role = usersCount.count === 0 ? 'admin' : 'user';
 
-      const hashedPassword = await bcrypt.hash(password, 10);
+      const hashedPassword = bcrypt.hashSync(password, 10);
       let uid = generateUID();
       
       // Ensure UID is unique
-      let existingUid = await db`SELECT id FROM users WHERE uid = ${uid}`;
-      while (existingUid.length > 0) {
+      let existingUid = db.prepare('SELECT id FROM users WHERE uid = ?').get(uid);
+      while (existingUid) {
         uid = generateUID();
-        existingUid = await db`SELECT id FROM users WHERE uid = ${uid}`;
+        existingUid = db.prepare('SELECT id FROM users WHERE uid = ?').get(uid);
       }
 
-      const result = await db`
-        INSERT INTO users (username, password, role, uid) 
-        VALUES (${username}, ${hashedPassword}, ${role}, ${uid})
-        RETURNING id
-      `;
-      res.json({ success: true, userId: result[0].id, uid });
+      const info = db.prepare('INSERT INTO users (username, password, role, uid) VALUES (?, ?, ?, ?)')
+                     .run(username, hashedPassword, role, uid);
+      
+      res.json({ success: true, userId: info.lastInsertRowid, uid });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.post("/api/login", async (req, res) => {
+  app.post("/api/login", (req, res) => {
     let { username, password } = req.body;
     username = username?.trim();
     console.log(`Login attempt for: ${username}`);
-    const users = await db`SELECT * FROM users WHERE LOWER(username) = LOWER(${username})`;
-    const user = users[0];
+    
+    const user = db.prepare('SELECT * FROM users WHERE LOWER(username) = LOWER(?)').get(username) as any;
 
     if (!user) {
       console.log(`User not found: ${username}`);
       return res.status(401).json({ error: "Invalid credentials" });
     }
-    const isMatch = await bcrypt.compare(password, user.password);
+    const isMatch = bcrypt.compareSync(password, user.password);
     if (!isMatch) {
       console.log(`Password mismatch for: ${username}`);
       return res.status(401).json({ error: "Invalid credentials" });
@@ -101,31 +99,29 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.get("/api/me", authenticate, async (req: any, res) => {
-    const users = await db`SELECT id, uid, username, role, avatar, credits, level, exp, text_color, bubble_style FROM users WHERE id = ${req.user.id}`;
-    let user = users[0];
+  app.get("/api/me", authenticate, (req: any, res) => {
+    let user = db.prepare('SELECT id, uid, username, role, avatar, credits, level, exp, text_color, bubble_style FROM users WHERE id = ?').get(req.user.id) as any;
 
     // If user doesn't have a UID (legacy users), generate one
     if (!user.uid) {
       let uid = generateUID();
-      let existingUid = await db`SELECT id FROM users WHERE uid = ${uid}`;
-      while (existingUid.length > 0) {
+      let existingUid = db.prepare('SELECT id FROM users WHERE uid = ?').get(uid);
+      while (existingUid) {
         uid = generateUID();
-        existingUid = await db`SELECT id FROM users WHERE uid = ${uid}`;
+        existingUid = db.prepare('SELECT id FROM users WHERE uid = ?').get(uid);
       }
-      await db`UPDATE users SET uid = ${uid} WHERE id = ${user.id}`;
+      db.prepare('UPDATE users SET uid = ? WHERE id = ?').run(uid, user.id);
       user.uid = uid;
     }
 
     res.json(user);
   });
 
-  app.post("/api/update-profile", authenticate, async (req: any, res) => {
+  app.post("/api/update-profile", authenticate, (req: any, res) => {
     let { avatar, username, textColor, bubbleStyle, joinEffect } = req.body;
     username = username?.trim();
 
-    const users = await db`SELECT credits, text_color, bubble_style FROM users WHERE id = ${req.user.id}`;
-    const user = users[0];
+    const user = db.prepare('SELECT credits, text_color, bubble_style FROM users WHERE id = ?').get(req.user.id) as any;
     let cost = 0;
 
     // Calculate cost
@@ -153,21 +149,21 @@ async function startServer() {
     if (user.credits < cost) return res.status(400).json({ error: "رصيدك غير كافٍ" });
 
     try {
-      await db.begin(async (sql: any) => {
-        if (cost > 0) await sql`UPDATE users SET credits = credits - ${cost} WHERE id = ${req.user.id}`;
+      const updateTransaction = db.transaction(() => {
+        if (cost > 0) db.prepare('UPDATE users SET credits = credits - ? WHERE id = ?').run(cost, req.user.id);
         
-        const updateData: any = { avatar };
+        if (avatar) db.prepare('UPDATE users SET avatar = ? WHERE id = ?').run(avatar, req.user.id);
         if (username) {
-            const existing = await sql`SELECT id FROM users WHERE LOWER(username) = LOWER(${username}) AND id != ${req.user.id}`;
-            if (existing.length > 0) throw new Error("اسم المستخدم مأخوذ بالفعل");
-            updateData.username = username;
+            const existing = db.prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?').get(username, req.user.id);
+            if (existing) throw new Error("اسم المستخدم مأخوذ بالفعل");
+            db.prepare('UPDATE users SET username = ? WHERE id = ?').run(username, req.user.id);
         }
-        if (textColor) updateData.text_color = textColor;
-        if (bubbleStyle) updateData.bubble_style = bubbleStyle;
-        if (joinEffect) updateData.join_effect = joinEffect;
-
-        await sql`UPDATE users SET ${sql(updateData)} WHERE id = ${req.user.id}`;
+        if (textColor) db.prepare('UPDATE users SET text_color = ? WHERE id = ?').run(textColor, req.user.id);
+        if (bubbleStyle) db.prepare('UPDATE users SET bubble_style = ? WHERE id = ?').run(bubbleStyle, req.user.id);
+        if (joinEffect) db.prepare('UPDATE users SET join_effect = ? WHERE id = ?').run(joinEffect, req.user.id);
       });
+      
+      updateTransaction();
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -197,12 +193,12 @@ async function startServer() {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const { userId, password } = req.body;
     try {
-      let users = await db`SELECT id FROM users WHERE uid = ${userId.toString()}`;
-      if (users.length === 0) users = await db`SELECT id FROM users WHERE id = ${parseInt(userId) || 0}`;
-      if (users.length === 0) return res.status(404).json({ error: "User not found" });
+      let user = db.prepare('SELECT id FROM users WHERE uid = ?').get(userId.toString()) as any;
+      if (!user) user = db.prepare('SELECT id FROM users WHERE id = ?').get(parseInt(userId) || 0) as any;
+      if (!user) return res.status(404).json({ error: "User not found" });
 
-      const hashedPassword = await bcrypt.hash(password, 10);
-      await db`UPDATE users SET password = ${hashedPassword} WHERE id = ${users[0].id}`;
+      const hashedPassword = bcrypt.hashSync(password, 10);
+      db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashedPassword, user.id);
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -213,58 +209,54 @@ async function startServer() {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const { roomId, userId, role } = req.body;
 
-    let users = await db`SELECT id FROM users WHERE uid = ${userId.toString()}`;
-    if (users.length === 0) users = await db`SELECT id FROM users WHERE id = ${parseInt(userId) || 0}`;
-    if (users.length === 0) return res.status(404).json({ error: "User not found" });
+    let user = db.prepare('SELECT id FROM users WHERE uid = ?').get(userId.toString()) as any;
+    if (!user) user = db.prepare('SELECT id FROM users WHERE id = ?').get(parseInt(userId) || 0) as any;
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-    await db`
-      INSERT INTO room_roles (room_id, user_id, role) 
-      VALUES (${roomId}, ${users[0].id}, ${role})
-      ON CONFLICT (room_id, user_id) DO UPDATE SET role = EXCLUDED.role
-    `;
+    db.prepare('INSERT OR REPLACE INTO room_roles (room_id, user_id, role) VALUES (?, ?, ?)').run(roomId, user.id, role);
     res.json({ success: true });
   });
 
   // --- Room Routes ---
-  app.get("/api/rooms", authenticate, async (req, res) => {
-    const rooms = await db`SELECT * FROM rooms`;
+  app.get("/api/rooms", authenticate, (req, res) => {
+    const rooms = db.prepare('SELECT * FROM rooms').all();
     res.json(rooms);
   });
 
-  app.get("/api/leaderboard", authenticate, async (req, res) => {
-    const topGivers = await db`SELECT id, uid, username, avatar, total_spent, level FROM users WHERE total_spent > 0 ORDER BY total_spent DESC LIMIT 10`;
+  app.get("/api/leaderboard", authenticate, (req, res) => {
+    const topGivers = db.prepare('SELECT id, uid, username, avatar, total_spent, level FROM users WHERE total_spent > 0 ORDER BY total_spent DESC LIMIT 10').all();
     res.json(topGivers);
   });
 
-  app.post("/api/rooms", authenticate, async (req: any, res) => {
+  app.post("/api/rooms", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const { name, description, icon } = req.body;
-    const result = await db`INSERT INTO rooms (name, description, icon) VALUES (${name}, ${description}, ${icon}) RETURNING id`;
-    res.json({ success: true, roomId: result[0].id });
+    const result = db.prepare('INSERT INTO rooms (name, description, icon) VALUES (?, ?, ?)').run(name, description, icon);
+    res.json({ success: true, roomId: result.lastInsertRowid });
   });
 
   // --- Trivia Bot Admin Routes ---
-  app.get("/api/admin/questions", authenticate, async (req: any, res) => {
+  app.get("/api/admin/questions", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
-    const questions = await db`SELECT * FROM bot_questions`;
+    const questions = db.prepare('SELECT * FROM bot_questions').all();
     res.json(questions);
   });
 
-  app.post("/api/admin/questions", authenticate, async (req: any, res) => {
+  app.post("/api/admin/questions", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const { question, answer, category } = req.body;
     try {
-      await db`INSERT INTO bot_questions (question, answer, category) VALUES (${question}, ${answer}, ${category || 'general'})`;
+      db.prepare('INSERT INTO bot_questions (question, answer, category) VALUES (?, ?, ?)').run(question, answer, category || 'general');
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
     }
   });
 
-  app.delete("/api/admin/questions/:id", authenticate, async (req: any, res) => {
+  app.delete("/api/admin/questions/:id", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     try {
-      await db`DELETE FROM bot_questions WHERE id = ${req.params.id}`;
+      db.prepare('DELETE FROM bot_questions WHERE id = ?').run(req.params.id);
       res.json({ success: true });
     } catch (e: any) {
       res.status(400).json({ error: e.message });
@@ -272,100 +264,92 @@ async function startServer() {
   });
 
   // --- Admin Routes ---
-  app.get("/api/admin/users", authenticate, async (req: any, res) => {
+  app.get("/api/admin/users", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
-    const users = await db`SELECT id, uid, username, role, credits, level, exp, avatar FROM users`;
+    const users = db.prepare('SELECT id, uid, username, role, credits, level, exp, avatar FROM users').all();
     res.json(users);
   });
 
-  app.post("/api/admin/add-credits", authenticate, async (req: any, res) => {
+  app.post("/api/admin/add-credits", authenticate, (req: any, res) => {
     if (req.user.role !== 'admin') return res.status(403).json({ error: "Forbidden" });
     const { userId, amount } = req.body;
     // Try to find by UID first, then by ID
-    let users = await db`SELECT id FROM users WHERE uid = ${userId.toString()}`;
-    if (users.length === 0) users = await db`SELECT id FROM users WHERE id = ${parseInt(userId) || 0}`;
+    let user = db.prepare('SELECT id FROM users WHERE uid = ?').get(userId.toString()) as any;
+    if (!user) user = db.prepare('SELECT id FROM users WHERE id = ?').get(parseInt(userId) || 0) as any;
 
-    if (users.length === 0) return res.status(404).json({ error: "User not found" });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-    await db`UPDATE users SET credits = credits + ${parseInt(amount)} WHERE id = ${users[0].id}`;
+    db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(parseInt(amount), user.id);
     res.json({ success: true });
   });
 
   // --- Room Management API ---
-  app.get("/api/rooms/:id/settings", async (req, res) => {
-    const rooms = await db`SELECT * FROM rooms WHERE id = ${req.params.id}`;
-    if (rooms.length === 0) return res.status(404).json({ error: "Room not found" });
-    res.json(rooms[0]);
+  app.get("/api/rooms/:id/settings", (req, res) => {
+    const room = db.prepare('SELECT * FROM rooms WHERE id = ?').get(req.params.id);
+    if (!room) return res.status(404).json({ error: "Room not found" });
+    res.json(room);
   });
 
-  app.post("/api/rooms/:id/settings", async (req, res) => {
+  app.post("/api/rooms/:id/settings", (req, res) => {
     const { name, description, icon, is_private, slow_mode, background_image } = req.body;
-    await db`
+    db.prepare(`
       UPDATE rooms 
-      SET name = ${name}, description = ${description}, icon = ${icon}, is_private = ${is_private ? 1 : 0}, slow_mode = ${slow_mode || 0}, background_image = ${background_image || null} 
-      WHERE id = ${req.params.id}
-    `;
+      SET name = ?, description = ?, icon = ?, is_private = ?, slow_mode = ?, background_image = ? 
+      WHERE id = ?
+    `).run(name, description, icon, is_private ? 1 : 0, slow_mode || 0, background_image || null, req.params.id);
     res.json({ success: true });
   });
 
-  app.get("/api/rooms/:id/bans", async (req, res) => {
-    const bans = await db`
+  app.get("/api/rooms/:id/bans", (req, res) => {
+    const bans = db.prepare(`
       SELECT b.*, u.username, u.avatar 
       FROM bans b 
       JOIN users u ON b.user_id = u.id 
-      WHERE b.room_id = ${req.params.id} AND b.type = 'ban'
-    `;
+      WHERE b.room_id = ? AND b.type = 'ban'
+    `).all(req.params.id);
     res.json(bans);
   });
 
-  app.delete("/api/rooms/:id/bans/:userId", async (req, res) => {
-    await db`DELETE FROM bans WHERE room_id = ${req.params.id} AND user_id = ${req.params.userId} AND type = 'ban'`;
+  app.delete("/api/rooms/:id/bans/:userId", (req, res) => {
+    db.prepare("DELETE FROM bans WHERE room_id = ? AND user_id = ? AND type = 'ban'").run(req.params.id, req.params.userId);
     res.json({ success: true });
   });
 
-  app.post("/api/rooms/:id/roles", async (req, res) => {
+  app.post("/api/rooms/:id/roles", (req, res) => {
     const { userId, role } = req.body;
 
     let targetUser;
     if (typeof userId === 'string' && userId.length > 5) {
-      const users = await db`SELECT id FROM users WHERE uid = ${userId}`;
-      targetUser = users[0];
+      targetUser = db.prepare('SELECT id FROM users WHERE uid = ?').get(userId) as any;
     } else {
-      const users = await db`SELECT id FROM users WHERE id = ${userId}`;
-      targetUser = users[0];
+      targetUser = db.prepare('SELECT id FROM users WHERE id = ?').get(userId) as any;
     }
 
     if (!targetUser) return res.status(404).json({ error: "User not found" });
 
-    await db`
-      INSERT INTO room_roles (room_id, user_id, role) 
-      VALUES (${req.params.id}, ${targetUser.id}, ${role})
-      ON CONFLICT (room_id, user_id) DO UPDATE SET role = EXCLUDED.role
-    `;
+    db.prepare('INSERT OR REPLACE INTO room_roles (room_id, user_id, role) VALUES (?, ?, ?)').run(req.params.id, targetUser.id, role);
     res.json({ success: true });
   });
 
-  app.post("/api/rooms/:id/clear-chat", async (req, res) => {
-    await db`DELETE FROM messages WHERE room_id = ${req.params.id}`;
+  app.post("/api/rooms/:id/clear-chat", (req, res) => {
+    db.prepare('DELETE FROM messages WHERE room_id = ?').run(req.params.id);
     io.to(`room_${req.params.id}`).emit("chat_cleared");
     res.json({ success: true });
   });
 
-  app.post("/api/admin/update-join-effect", async (req, res) => {
+  app.post("/api/admin/update-join-effect", (req, res) => {
     const { userId, effect } = req.body;
 
     let user;
     if (typeof userId === 'string' && userId.length > 5) {
-      const users = await db`SELECT id FROM users WHERE uid = ${userId}`;
-      user = users[0];
+      user = db.prepare('SELECT id FROM users WHERE uid = ?').get(userId) as any;
     } else {
-      const users = await db`SELECT id FROM users WHERE id = ${userId}`;
-      user = users[0];
+      user = db.prepare('SELECT id FROM users WHERE id = ?').get(userId) as any;
     }
 
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    await db`UPDATE users SET join_effect = ${effect || null} WHERE id = ${user.id}`;
+    db.prepare('UPDATE users SET join_effect = ? WHERE id = ?').run(effect || null, user.id);
     res.json({ success: true });
   });
 
@@ -383,11 +367,10 @@ async function startServer() {
 
   const activeTriviaPerRoom = new Map<string, { answer: string, reward: number, timer: NodeJS.Timeout }>();
 
-  async function askNextQuestion(roomIdStr: string) {
-    const questions = await db`SELECT * FROM bot_questions ORDER BY RANDOM() LIMIT 1`;
-    if (questions.length === 0) return; // No questions in DB
+  function askNextQuestion(roomIdStr: string) {
+    const q = db.prepare('SELECT * FROM bot_questions ORDER BY RANDOM() LIMIT 1').get() as any;
+    if (!q) return; // No questions in DB
 
-    const q = questions[0];
     const reward = Math.floor(Math.random() * 50) + 50; // 50 to 100
 
     io.to(`room_${roomIdStr}`).emit("receive_message", {
@@ -401,7 +384,7 @@ async function startServer() {
       timestamp: new Date().toISOString()
     });
 
-    const timer = setTimeout(async () => {
+    const timer = setTimeout(() => {
       io.to(`room_${roomIdStr}`).emit("receive_message", {
         id: Date.now(),
         roomId: roomIdStr,
@@ -413,9 +396,9 @@ async function startServer() {
         timestamp: new Date().toISOString()
       });
 
-      setTimeout(async () => {
+      setTimeout(() => {
         if (activeTriviaPerRoom.has(roomIdStr)) {
-          await askNextQuestion(roomIdStr);
+          askNextQuestion(roomIdStr);
         }
       }, 3000);
     }, 30000);
@@ -435,10 +418,10 @@ async function startServer() {
   io.on("connection", (socket) => {
     console.log("User connected:", socket.id);
 
-    socket.on("join_room", async ({ roomId, userId }) => {
+    socket.on("join_room", ({ roomId, userId }) => {
       // Check for bans
-      const bans = await db`SELECT * FROM bans WHERE room_id = ${roomId} AND user_id = ${userId} AND type = 'ban' AND (expires_at IS NULL OR expires_at > ${new Date().toISOString()})`;
-      if (bans.length > 0) {
+      const ban = db.prepare("SELECT * FROM bans WHERE room_id = ? AND user_id = ? AND type = 'ban' AND (expires_at IS NULL OR expires_at > ?)").get(roomId, userId, new Date().toISOString());
+      if (ban) {
         socket.emit("error", { message: "أنت محظور من دخول هذه الغرفة" });
         return;
       }
@@ -458,25 +441,24 @@ async function startServer() {
       activeUsersPerRoom.get(roomIdStr)!.add(userId);
 
       // Ensure user has a role in the room
-      const roles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${userId}`;
-      if (roles.length === 0) {
-        await db`INSERT INTO room_roles (room_id, user_id, role) VALUES (${roomId}, ${userId}, 'member')`;
+      const role = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, userId);
+      if (!role) {
+        db.prepare('INSERT INTO room_roles (room_id, user_id, role) VALUES (?, ?, ?)').run(roomId, userId, 'member');
       }
 
       // Get room members and roles
-      const members = await db`
+      const members = db.prepare(`
         SELECT u.id, u.uid, u.username, u.avatar, u.level, u.credits, u.text_color, u.bubble_style, rr.role 
         FROM users u 
         JOIN room_roles rr ON u.id = rr.user_id 
-        WHERE rr.room_id = ${roomId}
-      `;
+        WHERE rr.room_id = ?
+      `).all(roomId);
 
       io.to(`room_${roomId}`).emit("room_users", members);
 
       // Join Announcement (only if not already in room)
       if (!wasInRoom) {
-        const users = await db`SELECT username, join_effect FROM users WHERE id = ${userId}`;
-        const joiningUser = users[0];
+        const joiningUser = db.prepare('SELECT username, join_effect FROM users WHERE id = ?').get(userId) as any;
         if (joiningUser) {
           io.to(`room_${roomId}`).emit("receive_message", {
             id: Date.now() + Math.random(),
@@ -511,24 +493,20 @@ async function startServer() {
       });
     });
 
-    socket.on("delete_message", async ({ roomId, messageId, adminId }) => {
-      const admins = await db`SELECT role FROM users WHERE id = ${adminId}`;
-      const admin = admins[0];
-      const roomRoles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${adminId}`;
-      const roomRole = roomRoles[0];
+    socket.on("delete_message", ({ roomId, messageId, adminId }) => {
+      const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(adminId) as any;
+      const roomRole = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, adminId) as any;
 
       if (admin?.role === 'admin' || roomRole?.role === 'master' || roomRole?.role === 'moderator') {
-        await db`DELETE FROM messages WHERE id = ${messageId}`;
+        db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
         io.to(`room_${roomId}`).emit("message_deleted", { messageId });
       }
     });
 
-    socket.on("toggle_trivia_bot", async ({ roomId, userId, action }) => {
+    socket.on("toggle_trivia_bot", ({ roomId, userId, action }) => {
       const roomIdStr = roomId.toString();
-      const users = await db`SELECT username, role FROM users WHERE id = ${userId}`;
-      const user = users[0];
-      const roomRoles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${userId}`;
-      const roleInRoom = roomRoles[0];
+      const user = db.prepare('SELECT username, role FROM users WHERE id = ?').get(userId) as any;
+      const roleInRoom = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, userId) as any;
 
       if (roleInRoom?.role !== 'master' && roleInRoom?.role !== 'moderator' && user?.role !== 'admin') {
         socket.emit("error", { message: "فقط المشرف أو المالك يمكنه التحكم في المسابقة!" });
@@ -551,7 +529,7 @@ async function startServer() {
           });
 
           activeTriviaPerRoom.set(roomIdStr, { answer: "", reward: 0, timer: setTimeout(() => { }, 0) });
-          setTimeout(async () => await askNextQuestion(roomIdStr), 2000);
+          setTimeout(() => askNextQuestion(roomIdStr), 2000);
         }
       } else if (action === 'stop') {
         const trivia = activeTriviaPerRoom.get(roomIdStr);
@@ -572,7 +550,7 @@ async function startServer() {
       }
     });
 
-    socket.on("send_message", async ({ roomId, userId, content, type, recipientId }) => {
+    socket.on("send_message", ({ roomId, userId, content, type, recipientId }) => {
       // Add to active users
       if (!activeUsersPerRoom.has(roomId)) {
         activeUsersPerRoom.set(roomId, new Set());
@@ -580,20 +558,17 @@ async function startServer() {
       activeUsersPerRoom.get(roomId)!.add(userId);
 
       const roomIdStr = roomId.toString();
-      const users = await db`SELECT username, avatar, role, text_color, bubble_style FROM users WHERE id = ${userId}`;
-      const user = users[0];
+      const user = db.prepare('SELECT username, avatar, role, text_color, bubble_style FROM users WHERE id = ?').get(userId) as any;
 
-      const result = await db`
+      const result = db.prepare(`
         INSERT INTO messages (room_id, user_id, content, type, recipient_id) 
-        VALUES (${roomId}, ${userId}, ${content}, ${type || 'text'}, ${recipientId || null})
-        RETURNING id
-      `;
+        VALUES (?, ?, ?, ?, ?)
+      `).run(roomId, userId, content, type || 'text', recipientId || null);
 
-      const roomRoles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${userId}`;
-      const roleInRoom = roomRoles[0];
+      const roleInRoom = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, userId) as any;
 
       const messageData = {
-        id: result[0].id,
+        id: result.lastInsertRowid,
         roomId,
         userId,
         username: user.username,
@@ -624,7 +599,7 @@ async function startServer() {
           const reward = trivia.reward;
           const originalAnswer = trivia.answer;
           trivia.answer = ""; // Prevent multiple winners for the same question
-          await db`UPDATE users SET credits = credits + ${reward} WHERE id = ${userId}`;
+          db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(reward, userId);
 
           io.to(`room_${roomIdStr}`).emit("receive_message", {
             id: Date.now() + 1,
@@ -642,56 +617,52 @@ async function startServer() {
           // Ask next question immediately
           setTimeout(async () => {
             if (activeTriviaPerRoom.has(roomIdStr)) {
-              await askNextQuestion(roomIdStr);
+              askNextQuestion(roomIdStr);
             }
           }, 3000);
         }
       }
 
       // Update EXP for activity
-      await db`UPDATE users SET exp = exp + 1 WHERE id = ${userId}`;
+      db.prepare('UPDATE users SET exp = exp + 1 WHERE id = ?').run(userId);
       // Level up logic (simple: 100 exp per level)
-      const userDataList = await db`SELECT exp, level FROM users WHERE id = ${userId}`;
-      const userData = userDataList[0];
+      const userData = db.prepare('SELECT exp, level FROM users WHERE id = ?').get(userId) as any;
       if (userData.exp >= userData.level * 100) {
-        await db`UPDATE users SET level = level + 1, exp = 0 WHERE id = ${userId}`;
+        db.prepare('UPDATE users SET level = level + 1, exp = 0 WHERE id = ?').run(userId);
         socket.emit("level_up", { level: userData.level + 1 });
       }
     });
 
-    socket.on("admin_action", async ({ roomId, targetUserId, action, adminId, duration }) => {
+    socket.on("admin_action", ({ roomId, targetUserId, action, adminId, duration }) => {
       // Check if adminId has permission
-      const admins = await db`SELECT role FROM users WHERE id = ${adminId}`;
-      const admin = admins[0];
-      const roomRoles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${adminId}`;
-      const roomRole = roomRoles[0];
+      const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(adminId) as any;
+      const roomRole = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, adminId) as any;
 
       if (admin?.role === 'admin' || roomRole?.role === 'master' || roomRole?.role === 'moderator') {
         if (action === 'kick') {
           io.to(`room_${roomId}`).emit("user_kicked", { userId: targetUserId });
         } else if (action === 'ban') {
           const expiresAt = duration && duration > 0 ? new Date(Date.now() + duration * 60 * 60 * 1000).toISOString() : null;
-          await db`INSERT INTO bans (room_id, user_id, type, expires_at) VALUES (${roomId}, ${targetUserId}, 'ban', ${expiresAt})`;
+          db.prepare("INSERT INTO bans (room_id, user_id, type, expires_at) VALUES (?, ?, 'ban', ?)").run(roomId, targetUserId, expiresAt);
           io.to(`room_${roomId}`).emit("user_kicked", { userId: targetUserId });
         } else if (action === 'global_ban' && admin.role === 'admin') {
-          await db`UPDATE users SET is_banned = 1 WHERE id = ${targetUserId}`;
+          db.prepare('UPDATE users SET is_banned = 1 WHERE id = ?').run(targetUserId);
           io.emit("user_kicked", { userId: targetUserId }); // Kick from everywhere
         } else if (action === 'mute_text') {
-          await db`INSERT INTO bans (room_id, user_id, type) VALUES (${roomId}, ${targetUserId}, 'mute_text')`;
+          db.prepare("INSERT INTO bans (room_id, user_id, type) VALUES (?, ?, 'mute_text')").run(roomId, targetUserId);
           io.to(`room_${roomId}`).emit("user_muted", { userId: targetUserId, type: 'text' });
         }
         // Add more actions as needed
       }
     });
 
-    socket.on("claim_gift", async ({ roomId, userId }) => {
+    socket.on("claim_gift", ({ roomId, userId }) => {
       const amount = Math.floor(Math.random() * 50) + 10;
-      await db`UPDATE users SET credits = credits + ${amount} WHERE id = ${userId}`;
+      db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(amount, userId);
 
       io.to(`user_${userId}`).emit("credits_granted", { userId, amount });
 
-      const users = await db`SELECT username FROM users WHERE id = ${userId}`;
-      const user = users[0];
+      const user = db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as any;
 
       io.to(`room_${roomId}`).emit("receive_message", {
         id: Date.now(),
@@ -705,7 +676,7 @@ async function startServer() {
       });
     });
 
-    socket.on("send_gift", async ({ roomId, userId, recipientId, recipientName, giftId, price: clientPrice, name: clientName, icon: clientIcon, type: clientType }) => {
+    socket.on("send_gift", ({ roomId, userId, recipientId, recipientName, giftId, price: clientPrice, name: clientName, icon: clientIcon, type: clientType }) => {
       console.log("send_gift received:", { roomId, userId, type: clientType, price: clientPrice });
 
       const gifts = [
@@ -738,8 +709,7 @@ async function startServer() {
       const icon = gift.icon;
       const type = gift.type || 'gift';
 
-      const users = await db`SELECT username, credits FROM users WHERE id = ${userId}`;
-      const user = users[0];
+      const user = db.prepare('SELECT username, credits FROM users WHERE id = ?').get(userId) as any;
 
       if (type === 'random_box') {
         if (price < 1000) {
@@ -757,7 +727,7 @@ async function startServer() {
           return;
         }
 
-        await db`UPDATE users SET credits = credits - ${price} WHERE id = ${userId}`;
+        db.prepare('UPDATE users SET credits = credits - ? WHERE id = ?').run(price, userId);
         io.to(`user_${userId}`).emit("credits_deducted", { userId, amount: price });
 
         const recipients = Array.from(activeUsers).filter(id => id !== userId);
@@ -783,7 +753,7 @@ async function startServer() {
 
         for (const res of results) {
           if (res.amount > 0) {
-            await db`UPDATE users SET credits = credits + ${res.amount} WHERE id = ${res.userId}`;
+            db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(res.amount, res.userId);
             io.to(`user_${res.userId}`).emit("credits_granted", { userId: res.userId, amount: res.amount });
           }
         }
@@ -824,38 +794,40 @@ async function startServer() {
       }
 
       try {
-        await db.begin(async (sql: any) => {
-          await sql`UPDATE users SET credits = credits - ${totalPrice}, total_spent = total_spent + ${totalPrice} WHERE id = ${userId}`;
+        const giftTx = db.transaction(() => {
+          db.prepare('UPDATE users SET credits = credits - ?, total_spent = total_spent + ? WHERE id = ?').run(totalPrice, totalPrice, userId);
           
           const content = recipientId
             ? `🎁 أرسل ${user.username} هدية ${name} ${icon} إلى ${recipientName} بقيمة ${price} رصيد!`
             : `🎁 أرسل ${user.username} هدية ${name} ${icon} للجميع (${recipientCount} مستخدم) بقيمة إجمالية ${totalPrice} رصيد!`;
 
-          const msgResult = await sql`
+          const msgResult = db.prepare(`
             INSERT INTO messages (room_id, user_id, recipient_id, content, type) 
-            VALUES (${roomId}, ${userId}, ${recipientId || null}, ${content}, 'gift')
-            RETURNING id
-          `;
+            VALUES (?, ?, ?, ?, 'gift')
+          `).run(roomId, userId, recipientId || null, content);
 
-          const giftMessage = {
-            id: msgResult[0].id,
-            roomId,
-            userId,
-            username: user.username,
-            content,
-            type: "gift",
-            role: "member",
-            timestamp: new Date().toISOString()
-          };
-
-          io.to(`room_${roomId}`).emit("receive_message", giftMessage);
+          return { content, id: msgResult.lastInsertRowid };
         });
+        
+        const txResult = giftTx();
+
+        const giftMessage = {
+          id: txResult.id,
+          roomId,
+          userId,
+          username: user.username,
+          content: txResult.content,
+          type: "gift",
+          role: "member",
+          timestamp: new Date().toISOString()
+        };
+
+        io.to(`room_${roomId}`).emit("receive_message", giftMessage);
 
         io.to(`user_${userId}`).emit("credits_deducted", { userId, amount: totalPrice });
 
         if (price >= 1000) {
-          const roomData = await db`SELECT name FROM rooms WHERE id = ${roomId}`;
-          const room = roomData[0];
+          const room = db.prepare('SELECT name FROM rooms WHERE id = ?').get(roomId) as any;
           const globalContent = recipientId
             ? `🌟 إعلان ملكي: أرسل السخي ${user.username} هدية ${name} ${icon} إلى ${recipientName} في غرفة [${room?.name || roomId}]! 🌟`
             : `🌟 إعلان ملكي: أرسل السخي ${user.username} هدية ${name} ${icon} للجميع في غرفة [${room?.name || roomId}]! 🌟`;
@@ -936,11 +908,10 @@ async function startServer() {
       }
     });
 
-    socket.on("admin_mic_action", async ({ roomId, adminId, action, targetUserId, duration }) => {
-      const admins = await db`SELECT role FROM users WHERE id = ${adminId}`;
-      const admin = admins[0];
-      const roomRoles = await db`SELECT role FROM room_roles WHERE room_id = ${roomId} AND user_id = ${adminId}`;
-      const roomRole = roomRoles[0];
+    socket.on("admin_mic_action", ({ roomId, adminId, action, targetUserId, duration }) => {
+      const admin = db.prepare('SELECT role FROM users WHERE id = ?').get(adminId) as any;
+      const roomRole = db.prepare('SELECT role FROM room_roles WHERE room_id = ? AND user_id = ?').get(roomId, adminId) as any;
+      
       if (admin?.role === 'admin' || roomRole?.role === 'master' || roomRole?.role === 'moderator') {
         const state = roomMics.get(roomId);
         if (state) {
@@ -968,7 +939,7 @@ async function startServer() {
       }
     });
 
-    socket.on("disconnect", async () => {
+    socket.on("disconnect", () => {
       console.log("User disconnected");
       const userId = socket.data.userId;
 
@@ -1003,18 +974,17 @@ async function startServer() {
           }
 
           // Update room users list for everyone
-          const members = await db`
+          const members = db.prepare(`
             SELECT u.id, u.username, u.avatar, u.level, u.credits, rr.role 
             FROM users u 
             JOIN room_roles rr ON u.id = rr.user_id 
-            WHERE rr.room_id = ${parseInt(roomId)}
-          `;
+            WHERE rr.room_id = ?
+          `).all(parseInt(roomId));
 
           io.to(`room_${roomId}`).emit("room_users", members);
 
           // Leave Announcement
-          const users = await db`SELECT username FROM users WHERE id = ${userId}`;
-          const leavingUser = users[0];
+          const leavingUser = db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as any;
           if (leavingUser) {
             io.to(`room_${roomId}`).emit("receive_message", {
               id: Date.now(),
@@ -1032,8 +1002,8 @@ async function startServer() {
   });
 
   // --- Hourly Gift Box ---
-  setInterval(async () => {
-    const rooms = await db`SELECT id FROM rooms`;
+  setInterval(() => {
+    const rooms = db.prepare('SELECT id FROM rooms').all() as any[];
     rooms.forEach(room => {
       const randomCredits = Math.floor(Math.random() * 50) + 10;
       io.to(`room_${room.id}`).emit("gift_box", { amount: randomCredits });
@@ -1041,15 +1011,18 @@ async function startServer() {
   }, 3600000); // Every hour
 
   // --- Credit Granting (Every 5 minutes) ---
-  setInterval(async () => {
-    for (const [roomId, userIds] of activeUsersPerRoom.entries()) {
-      for (const userId of userIds) {
-        const amount = 5;
-        await db`UPDATE users SET credits = credits + ${amount} WHERE id = ${userId}`;
-        io.to(`user_${userId}`).emit("credits_granted", { userId, amount });
+  setInterval(() => {
+    const creditTx = db.transaction(() => {
+      for (const [roomId, userIds] of activeUsersPerRoom.entries()) {
+        for (const userId of userIds) {
+          const amount = 5;
+          db.prepare('UPDATE users SET credits = credits + ? WHERE id = ?').run(amount, userId);
+          io.to(`user_${userId}`).emit("credits_granted", { userId, amount });
+        }
+        userIds.clear();
       }
-      userIds.clear();
-    }
+    });
+    creditTx();
   }, 300000); // 5 minutes
 
   // --- Vite Integration ---
